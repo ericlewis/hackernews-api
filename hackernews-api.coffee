@@ -1,7 +1,6 @@
-
 ###
  * ==========================================================
- * Name:    hackernews-api.js v0.1
+ * Name:    hackernews-api.js v0.2
  * Author:  Eric E. Lewis
  * Website: http://www.boxy.co
  * ===================================================
@@ -20,230 +19,167 @@
  * limitations under the License.
  * ==========================================================
 ###
-# config(ish), port to bind to, jquery cdn url
-listen_port =  if process.argv[2] == undefined then 1337 else process.argv[2].substring 2
-jquery_url  = 'http://ajax.googleapis.com/ajax/libs/jquery/1.7.2/jquery.min.js'
 
-# ------- required files
-jsdom  = require 'jsdom' 
-api    = require('express').createServer()
+jsdom  = require 'jsdom'
+server = require('express').createServer()
 
-# ------- reused functions
-## console logger for debug + tracking
-log = (msg) ->
- console.log msg
- return
- 
-pageScraper = (req, res, errors, window) ->
-    # scrape the links with jquery
-    $ = window.$
-    links = []
+config = require('./config')
 
-    $('td.title:not(:last) a').each -> 
-      item = $(this)
-      itemSubText = item.parent().parent().next().children '.subtext'
-      itemLinkText    = item.next().text().trim()
+#
+# Functions
+#
+tools =
+	commentScraper : (req, res, errors, window) ->
+		$ = window.$
+		
+		comments = []				
+		
+		$('td .default > span').each ->
+			parent = $(this).parent()
+			childspan = parent.children('div').children('span')
+			
+			comments[comments.length] = 
+				comment   : $(this).children('font').html()
+				indent    : parseInt parent.prev().prev().children('img').attr('width') / 40
+				postedBy  : childspan.children('a:eq(0)').text()
+				postedAgo : childspan.children('a').remove() and parent.children('div').children('span').text().substring(0,15).trim()
+			return
+		
+		if comments.length > 0 then res.json comments: comments, requestTime: new Date(), 200 else res.json error: 'no comments found', requestTime: new Date(), 404
+		
+		return
+		
+		
+	pageScraper : (req, res, errors, window) ->
+	    # scrape the links with jquery
+	    $ = window.$
+	    links = []
+	
+	    $('td.title:not(:last) a').each -> 
+	      item = $(this)
+	      itemSubText = item.parent().parent().next().children '.subtext'
+	      itemLinkText    = item.next().text().trim()
 
-      links[links.length] =
-        href       : if itemLinkText != '' then item.attr('href') else 'http://news.ycombinator.com/' + item.attr 'href'
-        title      : item.text()
-        subtitle   : itemSubText.text()
-        postedby   : itemSubText.children('a:eq(0)').text()
-        site       : if itemLinkText != '' then itemLinkText else '(Hacker News)'
-        discussid  : itemSubText.children('a:eq(1)').attr('href').substring 8
+	      links[links.length] =
+	        url          : if item.attr('href').indexOf('http') is 0 then item.attr('href') else "#{config.server.base_url}#{item.attr 'href'}"
+	        title        : item.text()
+	        points    	 : parseInt itemSubText.children('span').text().split(' ')[0]
+	        postedBy   	 : itemSubText.children('a:eq(0)').text()
+	        postedAgo 	 : itemSubText.text().split(' ').slice(4,-4).join(' ')
+	        commentCount : parseInt itemSubText.children('a:eq(1)').text().split(' ')[0]
+	        id   	     : parseInt itemSubText.children('a:eq(1)').attr('href')?.substring 8
+	
+	      return
+	    
+	
+	    # get the link for the next page
+	    nextPageLink = $('td.title:last a').attr('href')
+	    nextPageLink = if nextPageLink != 'news2' then nextPageLink.split('=')[1] else nextPageLink
+	    
+	    if links.length > 0 then res.json links: links, nextId: nextPageLink, requestTime: new Date(), 200 else res.json error: 'no links found', requestTime: new Date(), 404
+	    
+	    return
+	    
+	 profileScraper: (req, res, errors, window) ->
+	 	# scrape the links with jquery
+	    $ = window.$
+	
+	    item = $('form tr td:odd')
 
-      return
-    
-
-    # get the link for the next page
-    nextPageLink = $('td.title:last a').attr 'href' 
-    	
-    res.json 
-      links : links,
-      next  : if nextPageLink == 'news2' then nextPageLink else 
-              try
-               nextPageLink.split("=")[1]
-    
-    return
-
-commentScraper = (req, res, errors, window) ->
+	    profile = 
+	    	about      : item.get(4).innerHTML
+	    	username   : item.get(0).innerHTML
+	    	createdAgo : item.get(1).innerHTML
+	    	karma	   : parseInt item.get(2).innerHTML
+	    
+	    res.json profile: profile, requestTime: new Date(), 200
+	    
+	    return  
+		
+# ------- get post comments by discuss id
+server.get '/discuss/:id?', (req, res) ->
 	# set the url to be scrap, add the id if provided
-	html  = 'http://news.ycombinator.com/threads?id='
+	html  = "#{config.server.base_url}item?id="
+	thread  = req.params.id
+	
+	# scrap the page now!
+	jsdom.env 
+		html: "#{html}#{thread}",
+		scripts:  [ config.server.jquery_url ]
+		done: (errors, window) ->
+			try
+				tools.commentScraper
+			catch err
+				res.json error: 'invalid id', requestTime: new Date(), 404
+			return
+			
+server.get '/profile/:userid?', (req, res) ->
+	userid = req.params.userid
+	html = "#{config.server.base_url}user?id=#{userid}"
+	
+	jsdom.env 
+		html: html,
+		scripts:  [ config.server.jquery_url ]
+		done: (errors, window) ->
+			try
+				tools.profileScraper req, res, errors, window
+			catch err
+				res.json error: 'invalid username', requestTime: new Date(), 404
+			return	
+						
+server.get '/profile/:id/comments?', (req, res) ->
+	# set the url to be scrap, add the id if provided
+	html  = "#{config.server.base_url}threads?id="
 	userid  = req.params.id
 	
 	# scrap the page now!
 	jsdom.env 
-	html: html + userid,
-	scripts:  [ jquery_url ]
-	done: (errors, window) ->
-	$ = window.$
-	comments = []
-	
-	$('td .default > span').each ->
-		comments[comments.length] = 
-			text     : $(this).text()
-			indent   : $(this).parent().prev().prev().children('img').attr('width') / 40
-			postedby : $(this).parent().children('div').children('span').children('a:eq(0)').text()
-			posttime : $(this).parent().children('div').children('span').children('a').remove() and $('td .default > span').parent().children('div').children('span').text().substring(0,14).trim()
-		return
-	
-	res.json comments: comments
-	return
-					
-	return
+		html: "#{html}#{id}",
+		scripts:  [ config.server.jquery_url ]
+		done: (errors, window) ->
+			try
+				tools.commentScraper
+			catch err
+				res.json error: 'invalid id', requestTime: new Date(), 404
+			return		
 
-# ------- redirect / to news
-api.get '/', (req,res) -> 
- res.redirect '/news/'
- return
+server.get '/profile/:id/submissions?', (req, res) ->
+	# set the url to be scrap, add the id if provided
+	html  = "#{config.server.base_url}submitted?id="
+	userid  = req.params.id
 
-
-# ------- get news, and get news by pageid
-api.get '/news/:page?', (req,res) -> 
+	# scrap the page now!
+	jsdom.env 
+		html: "#{html}#{userid}",
+		scripts:  [ config.server.jquery_url ]
+		done: (errors, window) ->
+			try
+				tools.pageScraper
+			catch err
+				res.json error: 'invalid username', requestTime: new Date(), 404
+			return		
+			
+server.get '/:root/:page?', (req,res) -> 
  
  # set the url to be scrap, add the id if provided
- html  = 'http://news.ycombinator.com/'
- page  = req.params.page
+ root   = req.params.root
+ page   = req.params.page
  
- html += 'x?fnid=' if page != undefined and page != 'news2'
- html += page if page != undefined
- 
+ html = if not page? then "#{config.server.base_url}#{root}" else if page is 'news2' then "#{config.server.base_url}#{page}" else "#{config.server.base_url}x?fnid=#{page}"
+
  # scrap the page now!
  jsdom.env 
    html: html,
-   scripts:  [ jquery_url ]
+   scripts:  [ config.server.jquery_url ]
    done: (errors, window) ->
-   			pageScraper req, res, errors, window
-   			return
-	
- return
- 
-# ------- get post comments by discuss id
-api.get '/discuss/:id?', (req,res) ->
- # set the url to be scrap, add the id if provided
- html  = 'http://news.ycombinator.com/item?id='
- userid  = req.params.id
- 
- # scrap the page now!
- jsdom.env 
-   html: html + userid,
-   scripts:  [ jquery_url ]
-   done: (errors, window) ->
-    commentScraper req, res, errors, window
-    return
-   				
- return
- 
-# ------- get news, and get news by pageid
-api.get '/news/:page?', (req,res) -> 
- 
- # set the url to be scrap, add the id if provided
- html  = 'http://news.ycombinator.com/'
- page  = req.params.page
- 
- html += 'x?fnid=' if page != undefined and page != 'news2'
- html += page if page != undefined
- 
- # scrap the page now!
- jsdom.env 
-   html: html,
-   scripts:  [ jquery_url ]
-   done: (errors, window) ->
-   			pageScraper req, res, errors, window
-   			return
-	
- return
- 
-# ------- get ask HN news
-api.get '/ask', (req,res) ->
- # set the url to be scrap, add the id if provided
- html  = 'http://news.ycombinator.com/ask'
- 
- # scrap the page now!
- jsdom.env 
-   html: html,
-   scripts:  [ jquery_url ]
-   done: (errors, window) ->
-    pageScraper req, res, errors, window
-    return
-   				
- return
+   			try
+   				tools.pageScraper req, res, errors, window
+   			catch err
+   				res.json error: 'invalid nextId', requestTime: new Date(), 404
+   			return		
 
 
-# ------- get user profile by id
-api.get '/user/:id?', (req,res) -> 
- 
- # set the url to be scraped, add the id if provided
- html = 'http://news.ycombinator.com/user?id='
- userid = req.params.id
 
- if userid != undefined
-
-	 # scrape the page now!
-	 jsdom.env 
-	   html: html + userid,
-	   scripts:  [ jquery_url ]
-	   done: (errors, window) ->
-		    # scrape the links with jquery
-		    $ = window.$
-		   
-		    profile = $('form tr td:odd')
-		    try
-			    res.json
-			    	username : profile.get(0).innerHTML
-			    	created  : profile.get(1).innerHTML
-			    	karma    : profile.get(2).innerHTML
-			    	average  : profile.get(3).innerHTML
-			    	about    : profile.get(4).innerHTML
-			    	
-		    return
-	
-	 
- else
-  res.json error: 'no userid specified'
-  
- return
-
-
-# ------- get user submissions by user id
-api.get '/user/:id/submissions?', (req,res) ->
- 
- # set the url to be scraped, add the id if provided
- html   = 'http://news.ycombinator.com/submitted?id='
- userid = req.params.id
-
- if userid != undefined
-
-	 # scrape the page now!
-	 jsdom.env 
-	   html: html + userid,
-	   scripts:  [ jquery_url ]
-	   done: (errors, window) ->
-   			pageScraper req, res, errors, window
-   			return
-	
-	 
- else
-  res.json error: 'no userid specified' 
-  
- return
- 
-# ------- get user comments by user id
-api.get '/user/:id/comments', (req,res) ->
- # set the url to be scrap, add the id if provided
- html  = 'http://news.ycombinator.com/threads?id='
- userid  = req.params.id
- 
- # scrap the page now!
- jsdom.env 
-   html: html + userid,
-   scripts:  [ jquery_url ]
-   done: (errors, window) ->
-    commentScraper req, res, errors, window
-    return
-   				
- return
- 
-# bind the server to the port!
-api.listen listen_port 
-log 'hackernews api running on port ' + listen_port 
+# ------- bind server
+server.listen config.server.listen_port 
+console.log "Server running on port: #{config.server.listen_port}"
